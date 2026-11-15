@@ -44,7 +44,7 @@ python -m flake8 premium_calculator.py
 | **Pylint** | 5.73 / 10 | **10.00 / 10** | > 9.5 / 10 | Exceeded |
 | **Bandit** | 10 findings (1 High, 5 Med, 4 Low) | **0 findings** | 0 unresolved | Clean |
 | **Flake8** | 19 violations | **0 violations** | 0 violations | Clean |
-| **Automated Tests** | N/A | **20 passed (100%)** | All passing | Verified |
+| **Automated Tests** | N/A | **22 passed (100%)** | All passing | Verified |
 
 ## Deliverables
 

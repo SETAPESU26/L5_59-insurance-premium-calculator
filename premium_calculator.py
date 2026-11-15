@@ -11,6 +11,7 @@ import math
 import os
 import secrets
 import ssl
+import stat
 import tarfile
 import tempfile
 import urllib.parse
@@ -122,11 +123,28 @@ def policy_number() -> str:
 
 
 def save_quote(name: str, premium: float) -> str:
-    """Save quote details to in-memory store and append to the log file."""
+    """Save quote details safely preventing symlink attacks."""
     number = policy_number()
     quotes[number] = {"name": name, "premium": float(premium)}
-    with open(LOG_FILE, "a", encoding="utf-8") as file_handle:
-        file_handle.write(f"{number},{name},{premium:.2f}\n")
+    flags = os.O_CREAT | os.O_WRONLY | os.O_APPEND
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+
+    fd = os.open(LOG_FILE, flags, 0o600)
+    try:
+        fstat = os.fstat(fd)
+        if hasattr(os, "getuid") and fstat.st_uid != os.getuid():
+            raise PermissionError("Log file ownership mismatch")
+        if not stat.S_ISREG(fstat.st_mode):
+            raise OSError("Log target is not a regular file")
+        with open(fd, "a", encoding="utf-8", closefd=True) as file_handle:
+            file_handle.write(f"{number},{name},{premium:.2f}\n")
+    except Exception:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        raise
     return number
 
 
@@ -248,7 +266,7 @@ def main() -> None:
     )
     print("Imported:", import_policies(sample_xml))
     print("Saved as:", save_quote("Kiran", p1))
-    auth_token = os.environ.get("UNDERWRITER_TOKEN", "uw-7f3a9c2e1b")
+    auth_token = os.environ.get("UNDERWRITER_TOKEN", "")
     print("Authorised:", is_authorised(auth_token))
     print("Server would listen on", HOST)
     print_quotes()

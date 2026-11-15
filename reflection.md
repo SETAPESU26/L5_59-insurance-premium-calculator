@@ -44,8 +44,8 @@ The initial implementation contained multiple high-risk flaws that could comprom
    - *Risk:* Passing arbitrary URLs to `urllib.request.urlopen()` allowed unexpected protocols like `file://` or `ftp://`, opening avenues for local file disclosure and Server-Side Request Forgery (SSRF).
    - *Fix:* Enforced explicit scheme validation (`https` only) and migrated to `http.client.HTTPSConnection` configured with verified SSL contexts.
 
-5. **Hardcoded Credentials and Information Disclosure (Bandit B104, B105, B108, B311):**
-   - *Remediation:* Hardcoded tokens were replaced with runtime environment variable lookups (`os.environ.get("UNDERWRITER_TOKEN")`) and verified via constant-time comparison (`secrets.compare_digest`). The server bind address was shifted from `0.0.0.0` to loopback `127.0.0.1`, temporary logs were relocated to `tempfile.gettempdir()`, and policy numbers were migrated to cryptographically secure pseudo-random generators (`secrets.SystemRandom()`).
+5. **Hardcoded Credentials, Insecure Fallbacks, and Symlink Handling (Bandit B104, B105, B108, B311):**
+   - *Remediation:* Hardcoded tokens and fallback strings in demonstration code were completely removed; authorization strictly requires a configured `UNDERWRITER_TOKEN` environment variable and fails safely if absent. Verification uses constant-time `secrets.compare_digest()`. The server bind address was shifted from `0.0.0.0` to loopback `127.0.0.1`, policy numbers were migrated to cryptographically secure pseudo-random generators (`secrets.SystemRandom()`), and file logging in `save_quote()` was hardened against symlink hijacking using `os.open` with `O_NOFOLLOW`, restrictive permissions (`0o600`), and owner verification (`fstat.st_uid == os.getuid()`).
 
 Importantly, none of these findings were silenced using `# nosec` pragmas. True security requires eliminating the underlying vulnerability rather than suppressing the analyzer's output.
 

@@ -202,6 +202,33 @@ class TestPremiumCalculatorSecurity(unittest.TestCase):
 
         with patch.dict(os.environ, {}, clear=True):
             self.assertFalse(pc.is_authorised("dynamic-prod-token"))
+            self.assertFalse(pc.is_authorised("uw-7f3a9c2e1b"))
+            self.assertFalse(pc.is_authorised(""))
+
+    def test_authorization_fails_safely_without_fallback(self):
+        """When UNDERWRITER_TOKEN is absent, no hardcoded fallback succeeds."""
+        with patch.dict(os.environ, {}, clear=True):
+            token = os.environ.get("UNDERWRITER_TOKEN", "")
+            self.assertFalse(pc.is_authorised(token))
+            self.assertFalse(pc.is_authorised("uw-7f3a9c2e1b"))
+
+    def test_save_quote_rejects_symlink_attacks(self):
+        """save_quote must reject symlink targets to prevent file hijacking."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            victim_file = os.path.join(temp_dir, "victim.txt")
+            with open(victim_file, "w", encoding="utf-8") as vf:
+                vf.write("confidential baseline\n")
+
+            symlink_log = os.path.join(temp_dir, "symlink_quotes.log")
+            os.symlink(victim_file, symlink_log)
+
+            with patch.object(pc, "LOG_FILE", symlink_log):
+                with self.assertRaises(OSError):
+                    pc.save_quote("MaliciousActor", 9999.0)
+
+            # Ensure the victim file was not overwritten or appended to
+            with open(victim_file, "r", encoding="utf-8") as vf:
+                self.assertEqual(vf.read(), "confidential baseline\n")
 
     def test_safe_host_binding(self):
         """Server host binding must default to localhost, not 0.0.0.0."""
