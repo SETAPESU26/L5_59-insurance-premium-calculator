@@ -1,11 +1,17 @@
-import os
-import ssl
+"""Insurance premium calculator module.
+
+Provides policy rate calculations, underwriting validation, XML ingestion,
+document extraction, and instalment schedules.
+"""
+
+from datetime import datetime
 import math
+import os
 import random
+import ssl
 import tarfile
 import urllib.request
 import xml.etree.ElementTree as ET
-from datetime import datetime
 
 # Global quote book
 quotes = {}
@@ -14,94 +20,224 @@ UNDERWRITER_TOKEN = "uw-7f3a9c2e1b"
 LOG_FILE = "/tmp/premium_quotes.log" if os.name != "nt" else "premium_quotes.log"
 BASE_RATES = {"health": 5000, "motor": 3000, "life": 8000}
 
-def calculatePremium(policy_type, age, sum_insured, smoker, claims, discounts=[]):
-    base = BASE_RATES[policy_type]
-    premium = base + sum_insured * 0.002
-    if age > 45:
-        premium = premium * 1.5
-    if smoker:
-        premium = premium * 1.3
-    premium = premium + claims * 1000
-    for d in discounts:
-        premium = premium - d
-    discounts.append(500)
-    return premium
 
-def ageFromDob(dob):
-    born = datetime.strptime(dob, "%d-%m-%Y")
-    today = datetime.now()
-    age = today.year - born.year
+def _validate_risk_inputs(
+    policy_type: str, age: int, sum_insured: float
+) -> str:
+    """Validate core policy inputs and return normalized policy type."""
+    pol_type = policy_type.lower()
+    if pol_type not in BASE_RATES:
+        raise ValueError(f"Invalid policy type: '{policy_type}'")
+    if not isinstance(age, int) or age < 0:
+        raise ValueError("Age must be a non-negative integer")
+    if not isinstance(sum_insured, (int, float)) or sum_insured < 0:
+        raise ValueError("Sum insured must be a non-negative number")
+    return pol_type
+
+
+def _extract_optional_factors(extra_args, discounts, kwargs):
+    """Extract smoker status, claims count, and validated discount list."""
+    raw_smoker = extra_args[0] if extra_args else kwargs.get("smoker", False)
+    if isinstance(raw_smoker, str):
+        is_smoker = raw_smoker.strip().lower() in ("true", "yes", "1", "y")
+    else:
+        is_smoker = bool(raw_smoker)
+
+    claims_val = (
+        extra_args[1] if len(extra_args) > 1 else kwargs.get("claims", 0)
+    )
+    if not isinstance(claims_val, int) or claims_val < 0:
+        raise ValueError("Claims count must be a non-negative integer")
+
+    if len(extra_args) > 2:
+        raw_disc = extra_args[2]
+    elif discounts is not None:
+        raw_disc = discounts
+    else:
+        raw_disc = kwargs.get("discounts", None)
+
+    disc_list = [float(d) for d in (raw_disc or [])]
+    if any(d < 0 for d in disc_list):
+        raise ValueError("Discounts cannot be negative")
+
+    return is_smoker, claims_val, disc_list
+
+
+def calculate_premium(
+    policy_type: str,
+    age: int,
+    sum_insured: float,
+    *extra_args,
+    discounts=None,
+    **kwargs,
+) -> float:
+    """Calculate insurance premium based on risk factors and discounts."""
+    pol_type = _validate_risk_inputs(policy_type, age, sum_insured)
+    is_smoker, claims_val, disc_list = _extract_optional_factors(
+        extra_args, discounts, kwargs
+    )
+
+    base = BASE_RATES[pol_type]
+    premium = float(base + sum_insured * 0.002)
+    if age > 45:
+        premium *= 1.5
+    if is_smoker:
+        premium *= 1.3
+    premium += claims_val * 1000
+
+    for disc in disc_list:
+        premium -= disc
+
+    return max(0.0, round(premium, 2))
+
+
+def age_from_dob(dob: str) -> int:
+    """Calculate age in full years from date of birth (DD-MM-YYYY)."""
+    try:
+        born = datetime.strptime(dob, "%d-%m-%Y").date()
+    except (ValueError, TypeError) as err:
+        raise ValueError(
+            f"Invalid date format, expected DD-MM-YYYY: {dob}"
+        ) from err
+
+    today = datetime.now().date()
+    if born > today:
+        raise ValueError("Date of birth cannot be in the future")
+
+    age = today.year - born.year - (
+        (today.month, today.day) < (born.month, born.day)
+    )
     return age
 
-def policyNumber():
-    return "POL-" + str(random.randint(100000, 999999))
 
-def saveQuote(name, premium):
-    number = policyNumber()
-    quotes[number] = {"name": name, "premium": premium}
-    f = open(LOG_FILE, "a")
-    f.write("%s,%s,%.2f\n" % (number, name, premium))
-    f.close()
+def policy_number() -> str:
+    """Generate a policy identifier string."""
+    return f"POL-{random.randint(100000, 999999)}"
+
+
+def save_quote(name: str, premium: float) -> str:
+    """Save quote details to in-memory store and append to the log file."""
+    number = policy_number()
+    quotes[number] = {"name": name, "premium": float(premium)}
+    with open(LOG_FILE, "a", encoding="utf-8") as file_handle:
+        file_handle.write(f"{number},{name},{premium:.2f}\n")
     return number
 
-def importPolicies(xml_text):
+
+def import_policies(xml_text: str) -> list:
+    """Parse XML policy records into a list of tuples."""
     root = ET.fromstring(xml_text)
     result = []
-    for p in root.findall("policy"):
+    for policy in root.findall("policy"):
         try:
-            result.append((p.get("type"), int(p.get("age")), int(p.get("sum"))))
-        except:
+            pol_type = policy.get("type")
+            age_str = policy.get("age")
+            sum_str = policy.get("sum")
+            if pol_type and age_str is not None and sum_str is not None:
+                result.append((pol_type, int(age_str), int(sum_str)))
+        except (ValueError, TypeError):
             continue
     return result
 
-def fetchRates(url):
-    ctx = ssl._create_unverified_context()
-    return urllib.request.urlopen(url, context=ctx).read()
 
-def importClaimDocuments(archive_path):
-    # archive uploaded by the customer with scanned claim documents
-    tar = tarfile.open(archive_path)
-    tar.extractall("claims_docs")
-    tar.close()
+def fetch_rates(url: str) -> bytes:
+    """Fetch rate tables over HTTP or HTTPS connection."""
+    ctx = ssl.create_default_context()
+    with urllib.request.urlopen(url, context=ctx) as response:
+        return response.read()
 
-def monthlyInstalment(premium, months=12):
-    if months == 0:
-        return premium
-    else:
-        return math.floor(premium / months)
 
-def isAuthorised(token):
-    if token == UNDERWRITER_TOKEN:
-        return True
-    else:
-        return False
+def import_claim_documents(
+    archive_path: str, target_dir: str = "claims_docs"
+) -> None:
+    """Extract scanned claim documents from a tar archive."""
+    target_path = os.path.abspath(target_dir)
+    os.makedirs(target_path, exist_ok=True)
+    with tarfile.open(archive_path) as tar:
+        tar.extractall(target_path)
 
-def renewalDue(start, years=1):
-    date = datetime.strptime(start, "%Y-%m-%d")
-    return date.replace(year=date.year + years).strftime("%Y-%m-%d")
 
-def printQuotes():
+def monthly_instalment(premium: float, months: int = 12) -> int:
+    """Calculate the monthly instalment amount for a given total premium."""
+    if not isinstance(months, int) or months <= 0:
+        raise ValueError(
+            f"Instalment months must be a positive integer, got: {months}"
+        )
+    if premium < 0:
+        raise ValueError("Premium cannot be negative")
+    return math.floor(premium / months)
+
+
+def is_authorised(token: str) -> bool:
+    """Verify underwriter authorization token against known token."""
+    return bool(token == UNDERWRITER_TOKEN)
+
+
+def renewal_due(start: str, years: int = 1) -> str:
+    """Calculate policy renewal date, handling leap-year edge cases safely."""
+    date = datetime.strptime(start, "%Y-%m-%d").date()
+    target_year = date.year + years
+    try:
+        renewed = date.replace(year=target_year)
+    except ValueError:
+        renewed = date.replace(year=target_year, day=28)
+    return renewed.strftime("%Y-%m-%d")
+
+
+def print_quotes() -> None:
+    """Print all currently stored insurance quotes in formatted output."""
     print("===== Quote Book =====")
-    keys = list(quotes.keys())
-    for i in range(len(keys)):
-        print(i + 1, keys[i], quotes[keys[i]]["name"], "Rs.", quotes[keys[i]]["premium"])
+    for idx, (key, quote_info) in enumerate(quotes.items(), start=1):
+        print(
+            f"{idx} {key} {quote_info['name']} Rs. {quote_info['premium']}"
+        )
 
-def main():
-    p1 = calculatePremium("health", 30, 500000, False, 0)
-    p2 = calculatePremium("health", 30, 500000, False, 0)
-    p3 = calculatePremium("motor", 50, 800000, "no", 0)
-    p4 = calculatePremium("life", 25, 100000, False, 0, [3000, 3000, 3000])
+
+def main() -> None:
+    """Demonstrate insurance premium calculation workflows."""
+    p1 = calculate_premium("health", 30, 500000, False, 0)
+    p2 = calculate_premium("health", 30, 500000, False, 0)
+    p3 = calculate_premium("motor", 50, 800000, "no", 0)
+    p4 = calculate_premium("life", 25, 100000, False, 0, [3000, 3000, 3000])
     print("Quote 1:", p1)
     print("Quote 2 (same customer details):", p2)
     print("Non-smoker aged 50:", p3)
     print("Life with stacked discounts:", p4)
-    print("Age from DOB 31-12-1990:", ageFromDob("31-12-1990"))
-    print("Monthly instalment:", monthlyInstalment(p3))
-    print("Renewal due:", renewalDue("2025-03-15"))
-    print("Imported:", importPolicies("<policies><policy type='health' age='40' sum='300000'/><policy type='motor' age='abc' sum='1'/></policies>"))
-    print("Saved as:", saveQuote("Kiran", p1))
-    print("Authorised:", isAuthorised("uw-7f3a9c2e1b"))
+    print("Age from DOB 31-12-1990:", age_from_dob("31-12-1990"))
+    print("Monthly instalment:", monthly_instalment(p3))
+    print("Renewal due:", renewal_due("2025-03-15"))
+    sample_xml = (
+        "<policies>"
+        "<policy type='health' age='40' sum='300000'/>"
+        "<policy type='motor' age='abc' sum='1'/>"
+        "</policies>"
+    )
+    print("Imported:", import_policies(sample_xml))
+    print("Saved as:", save_quote("Kiran", p1))
+    print("Authorised:", is_authorised("uw-7f3a9c2e1b"))
     print("Server would listen on", HOST)
-    printQuotes()
+    print_quotes()
 
-main()
+
+def __getattr__(name: str):
+    """Provide backward compatibility for legacy camelCase function names."""
+    legacy_names = {
+        "calculatePremium": calculate_premium,
+        "ageFromDob": age_from_dob,
+        "policyNumber": policy_number,
+        "saveQuote": save_quote,
+        "importPolicies": import_policies,
+        "fetchRates": fetch_rates,
+        "importClaimDocuments": import_claim_documents,
+        "monthlyInstalment": monthly_instalment,
+        "isAuthorised": is_authorised,
+        "renewalDue": renewal_due,
+        "printQuotes": print_quotes,
+    }
+    if name in legacy_names:
+        return legacy_names[name]
+    raise AttributeError(f"module '{__name__}' has no attribute '{name}'")
+
+
+if __name__ == "__main__":
+    main()
