@@ -1,23 +1,28 @@
 """Insurance premium calculator module.
 
 Provides policy rate calculations, underwriting validation, XML ingestion,
-document extraction, and instalment schedules.
+document extraction, and instalment schedules with robust security controls.
 """
 
 from datetime import datetime
+import http.client
+import logging
 import math
 import os
-import random
+import secrets
 import ssl
 import tarfile
-import urllib.request
-import xml.etree.ElementTree as ET
+import tempfile
+import urllib.parse
+import defusedxml.ElementTree as defused_ET
+
+logger = logging.getLogger(__name__)
 
 # Global quote book
 quotes = {}
-HOST = "0.0.0.0"
-UNDERWRITER_TOKEN = "uw-7f3a9c2e1b"
-LOG_FILE = "/tmp/premium_quotes.log" if os.name != "nt" else "premium_quotes.log"
+HOST = "127.0.0.1"
+UNDERWRITER_TOKEN = os.environ.get("UNDERWRITER_TOKEN", "")
+LOG_FILE = os.path.join(tempfile.gettempdir(), "premium_quotes.log")
 BASE_RATES = {"health": 5000, "motor": 3000, "life": 8000}
 
 
@@ -111,8 +116,9 @@ def age_from_dob(dob: str) -> int:
 
 
 def policy_number() -> str:
-    """Generate a policy identifier string."""
-    return f"POL-{random.randint(100000, 999999)}"
+    """Generate a cryptographically secure unique policy identifier."""
+    num = secrets.SystemRandom().randint(100000, 999999)
+    return f"POL-{num}"
 
 
 def save_quote(name: str, premium: float) -> str:
@@ -125,8 +131,8 @@ def save_quote(name: str, premium: float) -> str:
 
 
 def import_policies(xml_text: str) -> list:
-    """Parse XML policy records into a list of tuples."""
-    root = ET.fromstring(xml_text)
+    """Safely parse XML policy data, rejecting malicious external entities."""
+    root = defused_ET.fromstring(xml_text)
     result = []
     for policy in root.findall("policy"):
         try:
@@ -135,26 +141,51 @@ def import_policies(xml_text: str) -> list:
             sum_str = policy.get("sum")
             if pol_type and age_str is not None and sum_str is not None:
                 result.append((pol_type, int(age_str), int(sum_str)))
-        except (ValueError, TypeError):
-            continue
+        except (ValueError, TypeError) as err:
+            logger.warning("Skipping invalid policy record: %s", err)
     return result
 
 
 def fetch_rates(url: str) -> bytes:
-    """Fetch rate tables over HTTP or HTTPS connection."""
-    ctx = ssl.create_default_context()
-    with urllib.request.urlopen(url, context=ctx) as response:
+    """Fetch rate tables over HTTPS with verified TLS certificates."""
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme.lower() != "https" or not parsed.netloc:
+        raise ValueError(
+            f"Unsupported or insecure URL scheme: '{parsed.scheme}'. "
+            "Only HTTPS is allowed."
+        )
+    context = ssl.create_default_context()
+    conn = http.client.HTTPSConnection(
+        parsed.netloc, context=context, timeout=10
+    )
+    try:
+        path = parsed.path if parsed.path else "/"
+        if parsed.query:
+            path += f"?{parsed.query}"
+        conn.request("GET", path)
+        response = conn.getresponse()
         return response.read()
+    finally:
+        conn.close()
 
 
 def import_claim_documents(
     archive_path: str, target_dir: str = "claims_docs"
 ) -> None:
-    """Extract scanned claim documents from a tar archive."""
+    """Extract scanned claim documents safely, preventing path traversal."""
     target_path = os.path.abspath(target_dir)
     os.makedirs(target_path, exist_ok=True)
-    with tarfile.open(archive_path) as tar:
-        tar.extractall(target_path)
+    with tarfile.open(archive_path, "r:*") as tar:
+        for member in tar.getmembers():
+            dest_path = os.path.abspath(os.path.join(target_path, member.name))
+            if not (
+                dest_path == target_path
+                or dest_path.startswith(target_path + os.sep)
+            ):
+                raise ValueError(
+                    f"Path traversal detected in archive: {member.name}"
+                )
+        tar.extractall(target_path, filter="data")
 
 
 def monthly_instalment(premium: float, months: int = 12) -> int:
@@ -169,8 +200,11 @@ def monthly_instalment(premium: float, months: int = 12) -> int:
 
 
 def is_authorised(token: str) -> bool:
-    """Verify underwriter authorization token against known token."""
-    return bool(token == UNDERWRITER_TOKEN)
+    """Verify underwriter authorization token against environment variable."""
+    expected_token = os.environ.get("UNDERWRITER_TOKEN")
+    if not expected_token or not token:
+        return False
+    return secrets.compare_digest(token, expected_token)
 
 
 def renewal_due(start: str, years: int = 1) -> str:
@@ -214,7 +248,8 @@ def main() -> None:
     )
     print("Imported:", import_policies(sample_xml))
     print("Saved as:", save_quote("Kiran", p1))
-    print("Authorised:", is_authorised("uw-7f3a9c2e1b"))
+    auth_token = os.environ.get("UNDERWRITER_TOKEN", "uw-7f3a9c2e1b")
+    print("Authorised:", is_authorised(auth_token))
     print("Server would listen on", HOST)
     print_quotes()
 
