@@ -13,7 +13,7 @@ import premium_calculator as pc
 
 
 class TestPremiumCalculatorQuality(unittest.TestCase):
-    """Test suite covering code quality, calculation accuracy, and edge cases."""
+    """Test suite covering code quality, calculation, and edge cases."""
 
     def test_identical_calculations_produce_identical_results(self):
         """Identical inputs must produce identical quotes across calls."""
@@ -79,7 +79,7 @@ class TestPremiumCalculatorQuality(unittest.TestCase):
             pc.monthly_instalment(-500.0, 12)
 
     def test_leap_year_renewal_dates(self):
-        """Renewal date must handle Feb 29th across leap and non-leap years."""
+        """Renewal date must handle Feb 29th across leap/non-leap years."""
         self.assertEqual(pc.renewal_due("2024-02-29", 1), "2025-02-28")
         self.assertEqual(pc.renewal_due("2024-02-29", 4), "2028-02-29")
         self.assertEqual(pc.renewal_due("2025-03-15", 1), "2026-03-15")
@@ -128,15 +128,17 @@ class TestPremiumCalculatorSecurity(unittest.TestCase):
             "<!DOCTYPE lolz [\n"
             " <!ENTITY lol 'lol'>\n"
             " <!ELEMENT lolz (#PCDATA)>\n"
-            " <!ENTITY lol1 '&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;'>\n"
+            " <!ENTITY lol1 '&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;'>\n"
             "]>\n"
-            "<policies><policy type='health' age='30' sum='100000'/></policies>"
+            "<policies>"
+            "<policy type='health' age='30' sum='100000'/>"
+            "</policies>"
         )
         with self.assertRaises(defusedxml.common.DefusedXmlException):
             pc.import_policies(malicious_xml)
 
     def test_url_validation_rejects_unsupported_schemes(self):
-        """Non-HTTPS URL schemes must be rejected to prevent SSRF/file leakage."""
+        """Non-HTTPS schemes must be rejected to prevent SSRF/leakage."""
         unsupported_urls = [
             "http://example.com/rates",
             "file:///etc/passwd",
@@ -189,7 +191,7 @@ class TestPremiumCalculatorSecurity(unittest.TestCase):
                 os.remove(tar_filename)
 
     def test_authorization_does_not_depend_on_hardcoded_secret(self):
-        """Underwriter token authorization must verify against environment variable."""
+        """Token authorization must verify against environment variable."""
         with patch.dict(
             os.environ, {"UNDERWRITER_TOKEN": "dynamic-prod-token"}, clear=True
         ):
@@ -202,11 +204,11 @@ class TestPremiumCalculatorSecurity(unittest.TestCase):
             self.assertFalse(pc.is_authorised("dynamic-prod-token"))
 
     def test_safe_host_binding(self):
-        """Server host binding must default to localhost, not all interfaces."""
+        """Server host binding must default to localhost, not 0.0.0.0."""
         self.assertEqual(pc.HOST, "127.0.0.1")
 
     def test_safe_temporary_directory(self):
-        """Log file path must use system temporary directory without hardcoded /tmp."""
+        """Log file path must use system tempdir without hardcoded /tmp."""
         expected_dir = tempfile.gettempdir()
         self.assertTrue(pc.LOG_FILE.startswith(expected_dir))
 
